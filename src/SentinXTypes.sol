@@ -6,13 +6,14 @@ library SentinXTypes {
         address payer;
         address payee;
         address agent;
-        address token; // address(0) === native ETH
-        uint256 amount;
-        uint256 released; // amount approved for payee to withdraw
-        uint256 withdrawn; // amount already withdrawn by payee
+        address token; 
+        uint256 totalDeposited;
+        mapping(address => uint256) deposits;
+        uint256 released; 
+        uint256 withdrawn; 
         uint256 createdAt;
         uint256 deadline;
-        bytes32 depositHash; // keccak256 of off-chain evidence / IPFS CID
+        bytes32 depositHash;
     }
     enum EscrowState {
         Active,
