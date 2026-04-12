@@ -33,6 +33,7 @@ contract AgentManager {
 
     /// @notice Owner sets an attestation/enclave hash for the agent
     function setAgentEnclaveHash(bytes32 enclaveHash) external onlyOwner {
+        if (enclaveHash == bytes32(0)) revert InvalidEnclaveHash();
         agentEnclaveHash = enclaveHash;
         emit AgentEnclaveHashSet(agent, enclaveHash);
     }
