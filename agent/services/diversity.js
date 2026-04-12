@@ -4,7 +4,7 @@ export async function checkDiversity(targetUserAddress) {
     console.log(`🔍 Sentinel analyzing wallet: ${targetUserAddress}...`);
 
     try {
-        const rpcUrl = "https://xlayerrpc.okx.com"; 
+        const rpcUrl = "https://testrpc.xlayer.tech"; 
         const provider = new ethers.JsonRpcProvider(rpcUrl);
 
         // Fetch On-chain Data directly

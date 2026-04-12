@@ -7,6 +7,7 @@ export async function pinEvidenceToIPFS(evidenceJSON) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json', 
+        'pinata_api_key': process.env.PINATA_API_KEY,
         'pinata_secret_api_key': process.env.PINATA_SECRET_API_KEY
       },
       body: JSON.stringify(evidenceJSON) 

@@ -2,27 +2,53 @@ import { checkDiversity } from './services/diversity.js';
 import { pinEvidenceToIPFS } from './utils/ipfsClient.js';
 import { issueOnchainAttestation } from './services/guardian.js';
 
-async function runSentinel() {
-    const targetWallet = "0x0332EEfd726c800a628f69D0D26040B21858F497"; // Replace with any active wallet for testing
+async function runSentinel(walletList) {
+    console.log(`🚀 Starting Milestone Verification for ${walletList.length} addresses...`);
     
-    // 1. Analyze
-    const report = await checkDiversity(targetWallet);
-    
-    if (report.isHuman) {
-        console.log("🌟 Human detected! Archiving evidence...");
-        
-        // 2. Upload to IPFS
-        const cid = await pinEvidenceToIPFS(report.report);
+    let stats = { humans: 0, bots: 0 };
 
-        const cidUri = await pinEvidenceToIPFS(report.report); 
-        console.log(`🔒 Evidence locked at: ${cidUri}`);
+    for (const targetWallet of walletList) {
+        console.log(`\n-----------------------------------------`);
+        console.log(`🔍 Analyzing: ${targetWallet}`);
         
-        // 3. TEE Signing (Simulated via CLI broadcast)
-        console.log(`✍️ Guardian (TEE) is now signing attestation with CID: ${cid}`);
-        console.log("🚀 Transaction would be sent to X Layer Registry now.");
-    } else {
-        console.log("🤖 Potential bot detected. No attestation issued.");
+        try {
+            // 1. Analyze (Role B's Logic)
+            const report = await checkDiversity(targetWallet);
+            
+            if (report.isHuman) {
+                console.log("🌟 Human detected!");
+                
+                // 2. Upload to IPFS (One time only!)
+                const cidUri = await pinEvidenceToIPFS(report.report); 
+                console.log(`🔒 Evidence locked at: ${cidUri}`);
+
+                // 3. On-chain Attestation (Role D's TEE/Ethers Logic)
+                console.log("⚡ Triggering Guardian to sign...");
+                const txHash = await issueOnchainAttestation(targetWallet, cidUri);
+                
+                console.log(`✅ Success! Hash: ${txHash}`);
+                stats.humans++;
+            } else {
+                console.log("🤖 Potential bot detected. Skipping attestation.");
+                stats.bots++;
+            }
+        } catch (error) {
+            console.error(`❌ Error processing ${targetWallet}:`, error.message);
+        }
     }
+
+    console.log(`\n=========================================`);
+    console.log(`🏁 BATCH COMPLETE`);
+    console.log(`✅ Humans Verified: ${stats.humans}`);
+    console.log(`🚫 Bots Rejected: ${stats.bots}`);
+    console.log(`=========================================`);
 }
 
-runSentinel();
+// Example: The list the Founder would submit via the Frontend
+const founderSubmission = [
+    "0x94A4365E6B7E79791258A3Fa071824BC2b75a394", 
+    "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", // Random test wallet
+    "0x0000000000000000000000000000000000000000"  // Should fail
+];
+
+runSentinel(founderSubmission);

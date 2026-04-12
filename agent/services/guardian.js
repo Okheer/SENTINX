@@ -1,38 +1,37 @@
 import { ethers } from 'ethers';
-import { OnchainOS } from '@okx/onchain-os-sdk'; 
 import { REGISTRY_CONTRACT_ADDRESS, registryInterface } from '../utils/contract.js';
 
 export async function issueOnchainAttestation(targetUserAddress, ipfsCid) {
     console.log(`🛡️ Guardian is preparing to sign attestation for: ${targetUserAddress}...`);
 
     try {
+        // 1. Connect to the X Layer Testnet RPC
         const provider = new ethers.JsonRpcProvider("https://testrpc.xlayer.tech");
 
-    
-        const agenticWallet = new OnchainOS.Wallet({
-            apiKey: process.env.OKX_API_KEY,
-            secretKey: process.env.OKX_SECRET_KEY,
-            passphrase: process.env.OKX_PASSPHRASE,
-            provider: provider 
-        });
+        // 2. Initialize the Wallet using native Ethers.js and your private key
+        const privateKey = process.env.PRIVATE_KEY;
+        if (!privateKey) throw new Error("Missing PRIVATE_KEY in .env file!");
+        
+        const agenticWallet = new ethers.Wallet(privateKey, provider);
 
+        // 3. Encode the transaction data
         const txData = registryInterface.encodeFunctionData("issueAttestation", [
             targetUserAddress, 
             ipfsCid
         ]);
 
-        console.log("✍️ Requesting TEE Enclave to sign transaction...");
+        console.log("✍️ Requesting wallet to sign transaction...");
 
         // 4. Send the transaction!
         const tx = await agenticWallet.sendTransaction({
             to: REGISTRY_CONTRACT_ADDRESS,
-            data: txData,
-  
+            data: txData
         });
 
         console.log(`✅ Transaction submitted!`);
-        console.log(`🔗 Explorer URL: https://www.okx.com/web3/explorer/xlayer-test/tx/${tx.hash}`);
+        console.log(`🔗 Explorer URL: https://www.oklink.com/xlayer-test/tx/${tx.hash}`);
         
+        // Wait for it to be mined
         await tx.wait();
         console.log("🎉 Attestation successfully minted on-chain!");
         
