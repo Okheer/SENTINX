@@ -27,4 +27,20 @@ interface IEscrow {
     function withdraw(uint256 escrowId, uint256 amount) external;
     function slash(uint256 escrowId, address to, uint256 amount, string calldata reason) external;
     function cancel(uint256 escrowId) external;
+
+    // view helpers
+    function getEscrow(uint256 escrowId) external view returns (
+        address payer,
+        address payee,
+        address agent,
+        address token,
+        uint256 totalDeposited,
+        uint256 released,
+        uint256 withdrawn,
+        uint256 createdAt,
+        uint256 deadline,
+        bytes32 depositHash
+    );
+
+    function getEscrowState(uint256 escrowId) external view returns (uint8);
 }
