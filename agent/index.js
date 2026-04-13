@@ -3,153 +3,218 @@
 // Polls for new founder submissions, scans them, attests approved ones,
 // triggers milestone release when threshold is met.
 
+// agent/index.js — complete version
 import dotenv from "dotenv";
 dotenv.config();
 
-import { scanBatch } from "./services/diversity.js";
-import { attestBatch, getVerifiedCount } from "./services/attestation.js";
-import { deployToYield, returnFromYield, estimateYield } from "./services/yield.js";
+import express from "express";
+import { readFileSync, writeFileSync, existsSync } from "fs";
 import { ethers } from "ethers";
 
-// ─── Config ────────────────────────────────────────────────────────────────
-const LOOP_INTERVAL_MS = 30_000;   // poll every 30 seconds
-const VERIFIED_THRESHOLD = 50;      // release tranche when 50 users verified
-const YIELD_DEPLOY_RATIO = 0.80;    // deploy 80% of idle USDC to yield
+import { scanBatch } from "./services/diversity.js";
+import { attestBatch, getVerifiedCount, getSentryAddress }
+    from "./services/attestation.js";
+import { deployToYield, returnFromYield, estimateYield }
+    from "./services/yield.js";
 
-// ─── Escrow interaction ────────────────────────────────────────────────────
-const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-const sentryWallet = new ethers.Wallet(process.env.SENTRY_PRIVATE_KEY, provider);
+// ── Config ────────────────────────────────────────────────────────────────
+const LOOP_MS = 30_000;
+const VERIFIED_THRESHOLD = 50;
+const YIELD_RATIO = 80n;
+const QUEUE_PATH = "/tmp/pending_addresses.json";
 
-const ESCROW_ABI = [
-    "function releaseTranche() external",
-    "function state() view returns (uint8)",
-    "function getIdleBalance() view returns (uint256)",
-    "function getVerifiedCount() view returns (uint256)",
-];
+// ── State (in-memory) ─────────────────────────────────────────────────────
+let cycleCount = 0;
+let deployedUSDC = 0n;
+let botsRejected = 0;
+let humansVerified = 0;
+let dealState = "WAITING_FOR_CONTRACTS";
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function readQueue() {
+    try {
+        if (!existsSync(QUEUE_PATH)) return [];
+        return JSON.parse(readFileSync(QUEUE_PATH, "utf8"));
+    } catch { return []; }
+}
+
+function clearQueue() {
+    writeFileSync(QUEUE_PATH, "[]", "utf8");
+}
 
 function getEscrow() {
+    if (!process.env.SENTINX_ESCROW_ADDRESS) return null;
+    const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+    const sentryWallet = new ethers.Wallet(process.env.SENTRY_PRIVATE_KEY, provider);
+    const ABI = [
+        "function releaseTranche() external",
+        "function state() view returns (uint8)",
+        "function getIdleBalance() view returns (uint256)",
+    ];
     return new ethers.Contract(
-        process.env.SENTINX_ESCROW_ADDRESS, ESCROW_ABI, sentryWallet
+        process.env.SENTINX_ESCROW_ADDRESS, ABI, sentryWallet
     );
 }
 
-// ─── Queue of pending addresses ───────────────────────────────────────────
-// In production: this comes from a smart contract event or an API.
-// For Day 2 demo: load from a JSON file that Person C's frontend writes to.
-let pendingAddresses = [];
-let deployedUSDC = 0n;
-
-/**
- * Load pending addresses from the shared queue.
- * Person C writes founder-submitted addresses to /tmp/pending_addresses.json
- * Person B reads and processes them here.
- */
-async function loadPendingAddresses() {
-    try {
-        const { readFileSync, existsSync } = await import("fs");
-        const path = "/tmp/pending_addresses.json";
-        if (!existsSync(path)) return [];
-        const raw = readFileSync(path, "utf8");
-        return JSON.parse(raw);
-    } catch {
-        return [];
-    }
-}
-
-/**
- * Main processing cycle.
- */
+// ── Main cycle ────────────────────────────────────────────────────────────
 async function runCycle() {
-    console.log(`\n[Sentry] ════ New cycle at ${new Date().toISOString()} ════`);
+    cycleCount++;
+    const time = new Date().toLocaleTimeString();
+    console.log(`\n[${time}] ════ Cycle #${cycleCount} ════`);
 
-    try {
-        // ── 1. Load pending addresses ──────────────────────────────────────────
-        const newAddresses = await loadPendingAddresses();
-        if (newAddresses.length > 0) {
-            console.log(`[Sentry] Processing ${newAddresses.length} new addresses...`);
+    // ── Step 1: Process pending addresses ──────────────────────────────────
+    const pending = readQueue();
 
-            // ── 2. Diversity scan ──────────────────────────────────────────────
-            const scanResults = await scanBatch(newAddresses);
-            const passCount = scanResults.filter(r => r.passed).length;
+    if (pending.length > 0) {
+        console.log(`[Sentry] Processing ${pending.length} addresses...`);
+
+        const scanResults = await scanBatch(pending);
+        const passed = scanResults.filter(r => r.passed).length;
+        const failed = scanResults.length - passed;
+
+        botsRejected += failed;
+        console.log(`[Sentry] Scan: ✅ ${passed} passed | ❌ ${failed} rejected`);
+
+        if (passed > 0) {
+            const { attested, rejected, errors } = await attestBatch(scanResults);
+            humansVerified += attested.length;
             console.log(
-                `[Sentry] Scan: ${passCount}/${scanResults.length} passed diversity check`
+                `[Attestation] ✅ Attested: ${attested.length} | ` +
+                `❌ Rejected: ${rejected.length} | ⚠️  Errors: ${errors.length}`
             );
-
-            // ── 3. Attest passed users on-chain ───────────────────────────────
-            if (passCount > 0) {
-                const { attested, rejected, errors } = await attestBatch(scanResults);
-                console.log(
-                    `[Sentry] Attested: ${attested.length} | ` +
-                    `Rejected: ${rejected.length} | Errors: ${errors.length}`
-                );
-            }
-
-            // Clear the queue (in production: mark as processed in DB)
-            const { writeFileSync } = await import("fs");
-            writeFileSync("/tmp/pending_addresses.json", "[]", "utf8");
         }
 
-        // ── 4. Check verified count → milestone trigger ────────────────────
-        if (process.env.IDENTITY_REGISTRY_ADDRESS) {
-            const verifiedCount = await getVerifiedCount();
-            console.log(`[Sentry] Verified users on-chain: ${verifiedCount}`);
+        clearQueue();
+    } else {
+        console.log("[Sentry] Queue empty — no new addresses");
+    }
 
-            if (verifiedCount >= VERIFIED_THRESHOLD) {
-                console.log(`[Sentry] 🎯 Threshold reached! Triggering milestone release...`);
+    // ── Step 2: Check milestone threshold ──────────────────────────────────
+    if (process.env.IDENTITY_REGISTRY_ADDRESS) {
+        try {
+            const count = await getVerifiedCount();
+            console.log(`[Sentry] Verified: ${count} / ${VERIFIED_THRESHOLD}`);
 
-                // Pull capital back from yield before release
+            if (count >= VERIFIED_THRESHOLD) {
+                console.log("");
+                console.log("╔══════════════════════════════════════╗");
+                console.log("║   🎯 MILESTONE THRESHOLD REACHED!    ║");
+                console.log("╚══════════════════════════════════════╝");
+
                 if (deployedUSDC > 0n) {
                     await returnFromYield(deployedUSDC);
                     deployedUSDC = 0n;
                 }
 
                 const escrow = getEscrow();
-                const tx = await escrow.releaseTranche();
-                await tx.wait();
-                console.log(`[Sentry] ✅ Milestone tranche released: ${tx.hash}`);
-            }
-        }
-
-        // ── 5. Yield management: deploy idle capital ───────────────────────
-        if (process.env.SENTINX_ESCROW_ADDRESS && deployedUSDC === 0n) {
-            try {
-                const escrow = getEscrow();
-                const idleBalance = await escrow.getIdleBalance();
-
-                if (idleBalance > ethers.parseUnits("10", 6)) { // min 10 USDC to deploy
-                    const deployAmount = (idleBalance * BigInt(Math.floor(YIELD_DEPLOY_RATIO * 100))) / 100n;
-                    await deployToYield(deployAmount);
-                    deployedUSDC = deployAmount;
-
-                    // Estimate yield earned so far
-                    const { earnedUSD, yieldPct } = await estimateYield(deployedUSDC);
-                    console.log(
-                        `[Sentry] 💰 Yield: $${earnedUSD.toFixed(4)} earned (${yieldPct.toFixed(4)}%)`
-                    );
+                if (escrow) {
+                    const tx = await escrow.releaseTranche();
+                    await tx.wait();
+                    dealState = "MILESTONE_COMPLETE";
+                    console.log(`[Sentry] ✅ Tranche released: ${tx.hash}`);
                 }
-            } catch (err) {
-                // Yield errors should not crash the main loop
-                console.error("[Sentry] Yield management error:", err.message);
             }
+        } catch (err) {
+            console.error("[Sentry] Registry read error:", err.message);
         }
+    } else {
+        console.log("[Sentry] Waiting for IDENTITY_REGISTRY_ADDRESS...");
+    }
 
-    } catch (err) {
-        console.error("[Sentry] Cycle error:", err.message);
+    // ── Step 3: Yield management ───────────────────────────────────────────
+    if (process.env.SENTINX_ESCROW_ADDRESS && deployedUSDC === 0n) {
+        try {
+            const escrow = getEscrow();
+            if (escrow) {
+                const idle = await escrow.getIdleBalance();
+                const min = ethers.parseUnits("10", 6);
+
+                if (idle > min) {
+                    const amount = (idle * YIELD_RATIO) / 100n;
+                    const result = await deployToYield(amount);
+                    if (result) {
+                        deployedUSDC = amount;
+                        const { earnedUSD } = await estimateYield(deployedUSDC);
+                        console.log(
+                            `[Yield] 💰 ${ethers.formatUnits(amount, 6)} USDC deployed | ` +
+                            `Yield earned so far: $${earnedUSD.toFixed(4)}`
+                        );
+                    }
+                }
+            }
+        } catch (err) {
+            console.error("[Yield] Error:", err.message);
+        }
+    } else if (!process.env.SENTINX_ESCROW_ADDRESS) {
+        console.log("[Yield]  Waiting for SENTINX_ESCROW_ADDRESS...");
     }
 }
 
-// ─── Bootstrap ────────────────────────────────────────────────────────────
-console.log("╔══════════════════════════════════════╗");
-console.log("║     SENTINX Sentry Agent v1.0        ║");
-console.log("╚══════════════════════════════════════╝");
+// ── Express API ───────────────────────────────────────────────────────────
+const app = express();
+app.use(express.json());
 
-// Print sentry address for Person A to whitelist
-const { getSentryAddress } = await import("./services/attestation.js");
-console.log(`[Sentry] Wallet address: ${getSentryAddress()}`);
-console.log(`[Sentry] → Give this address to Person A for contract whitelisting!`);
-console.log(`[Sentry] Loop interval: ${LOOP_INTERVAL_MS / 1000}s`);
-console.log(`[Sentry] Milestone threshold: ${VERIFIED_THRESHOLD} verified users`);
-console.log(`[Sentry] Starting...\n`);
+// Person C calls this to submit founder's user addresses
+app.post("/submit", (req, res) => {
+    const { addresses } = req.body;
+    if (!Array.isArray(addresses) || addresses.length === 0) {
+        return res.status(400).json({ error: "addresses must be a non-empty array" });
+    }
+
+    const existing = readQueue();
+    const combined = [...new Set([...existing, ...addresses])];
+    writeFileSync(QUEUE_PATH, JSON.stringify(combined), "utf8");
+
+    console.log(`[API] Queued ${addresses.length} addresses (total: ${combined.length})`);
+    res.json({ queued: addresses.length, total: combined.length });
+});
+
+// Person C polls this to update the dashboard
+app.get("/status", async (req, res) => {
+    let verifiedCount = 0;
+    let yieldEarned = 0;
+
+    try {
+        if (process.env.IDENTITY_REGISTRY_ADDRESS) {
+            verifiedCount = await getVerifiedCount();
+        }
+        if (deployedUSDC > 0n) {
+            const est = await estimateYield(deployedUSDC);
+            yieldEarned = est.earnedUSD;
+        }
+    } catch { /* safe fallback */ }
+
+    res.json({
+        sentry_wallet: getSentryAddress(),
+        verified_count: verifiedCount,
+        threshold: VERIFIED_THRESHOLD,
+        threshold_reached: verifiedCount >= VERIFIED_THRESHOLD,
+        bots_rejected: botsRejected,
+        humans_verified: humansVerified,
+        deployed_usdc: ethers.formatUnits(deployedUSDC, 6),
+        yield_earned_usd: yieldEarned.toFixed(4),
+        deal_state: dealState,
+        cycle_count: cycleCount,
+        contracts_ready: !!process.env.SENTINX_ESCROW_ADDRESS,
+    });
+});
+
+// ── Startup ───────────────────────────────────────────────────────────────
+console.log("┌─────────────────────────────────────────────────┐");
+console.log("│         SENTINX SENTRY AGENT v1.0               │");
+console.log("├─────────────────────────────────────────────────┤");
+console.log(`│ Sentry:   ${getSentryAddress()}  │`);
+console.log(`│ Registry: ${process.env.IDENTITY_REGISTRY_ADDRESS || "⏳ waiting for Person A"}`);
+console.log(`│ Escrow:   ${process.env.SENTINX_ESCROW_ADDRESS || "⏳ waiting for Person A"}`);
+console.log(`│ USDC:     ${process.env.USDC_ADDRESS_XLAYER || "⏳ waiting for Person A"}`);
+console.log(`│ Chain:    X Layer Testnet (195)                  │`);
+console.log("└─────────────────────────────────────────────────┘");
+console.log(`\n→ Give Person A this sentry address: ${getSentryAddress()}\n`);
+
+app.listen(3001, () => {
+    console.log("[API] POST http://localhost:3001/submit");
+    console.log("[API] GET  http://localhost:3001/status\n");
+});
 
 runCycle();
-setInterval(runCycle, LOOP_INTERVAL_MS);
+setInterval(runCycle, LOOP_MS);
