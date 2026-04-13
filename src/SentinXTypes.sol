@@ -11,10 +11,22 @@ library SentinXTypes {
         mapping(address => uint256) deposits;
         uint256 released; 
         uint256 withdrawn; 
+        uint256 yieldBalance;
         uint256 createdAt;
         uint256 deadline;
         bytes32 depositHash;
+        address[] depositors;
     }
+
+    struct Milestone {
+        uint256 escrowId;           // Which escrow this milestone belongs to
+        uint256 payoutAmount;       // How much to payout when claimed
+        uint256 targetUsers;        // Target number of verified users
+        bool isApproved;            // Agent approval flag
+        bool isClaimed;             // Founder claim flag
+        uint256 createdAt;          // When milestone was created
+    }
+
     enum EscrowState {
         Active,
         Released,
