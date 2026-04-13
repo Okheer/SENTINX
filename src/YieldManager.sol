@@ -19,6 +19,8 @@ contract YieldManager {
     event YieldWithdrawn(uint256 indexed escrowId, uint256 amount, uint256 tokenReceived);
 
     constructor(address swapRouter_, address weth_) {
+        if (swapRouter_ == address(0)) revert InvalidAddress();
+        if (weth_ == address(0)) revert InvalidAddress();
         swapRouter = ISwapRouter(swapRouter_);
         weth = IWETH9(weth_);
     }
@@ -33,12 +35,15 @@ contract YieldManager {
 
     /**
      * @notice Deploy funds to yield via Uniswap swap.
+     * Note: Caller must transfer tokens to this contract before calling.
      */
     function deployYield(
         uint256 escrowId,
         address tokenIn,
         uint256 amount
     ) external returns (uint256 yieldReceived) {
+        if (address(swapRouter) == address(0)) revert InvalidAddress();
+        
         address yieldToken = yieldTokens[escrowId];
         if (yieldToken == address(0)) revert Unauthorized();
         if (amount == 0) revert InvalidAmount();
@@ -76,6 +81,7 @@ contract YieldManager {
 
     /**
      * @notice Withdraw yield back to original token.
+     * Returns funds to the caller (Escrow contract).
      */
     function withdrawYield(
         uint256 escrowId,
@@ -110,9 +116,20 @@ contract YieldManager {
 
         tokenReceived = swapRouter.exactInputSingle(params);
 
-        // Step 4: Unwrap WETH to ETH if needed
+        // Step 4: Unwrap WETH to ETH if needed and transfer back
         if (tokenOut == address(0)) {
             weth.withdraw(tokenReceived);
+            (bool ok,) = msg.sender.call{value: tokenReceived}("");
+            if (!ok) revert TransferFailed();
+        } else {
+            // Transfer token back to caller
+            (bool success, bytes memory data) = tokenOut.call(
+                abi.encodeWithSelector(IERC20.transfer.selector, msg.sender, tokenReceived)
+            );
+            if (!success) revert TransferFailed();
+            if (data.length > 0) {
+                if (!abi.decode(data, (bool))) revert TransferFailed();
+            }
         }
 
         // Step 5: Update tracking
@@ -142,4 +159,6 @@ contract YieldManager {
             if (!abi.decode(data, (bool))) revert TransferFailed();
         }
     }
+
+    receive() external payable {}
 }

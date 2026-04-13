@@ -18,3 +18,4 @@ error MilestoneAlreadyApproved();
 error MilestoneNotApproved();
 error MilestoneAlreadyClaimed();
 error MilestoneNotFound();
+error EscrowIsLOcked();

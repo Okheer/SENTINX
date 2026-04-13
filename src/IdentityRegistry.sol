@@ -24,6 +24,7 @@ contract IdentityRegistry is IIdentityRegistry {
     }
 
     function setAgentManager(address agentManager_) external onlyOwner {
+        if (agentManager_ == address(0)) revert InvalidAddress();
         _agentManager = AgentManager(agentManager_);
     }
 

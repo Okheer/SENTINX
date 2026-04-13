@@ -4,6 +4,11 @@ pragma solidity ^0.8.13;
 import "./SentinXTypes.sol";
 import "./Errors.sol";
 
+// Forward declaration for circular dependency
+interface IEscrowForMilestones {
+    function release(uint256 escrowId, uint256 amount) external;
+}
+
 /**
  * @dev MilestoneManager handles milestone creation, approval, and payouts.
  * Independent from Escrow but coordinated through it.
@@ -12,13 +17,26 @@ contract MilestoneManager {
     uint256 public nextMilestoneId;
     mapping(uint256 => SentinXTypes.Milestone) public milestones;
     mapping(uint256 => uint256[]) public escrowMilestones; // escrowId => milestone IDs
+    mapping(uint256 => bool) public milestoneExists; // Track which milestones were created
+    
+    IEscrowForMilestones public escrowContract; // Reference to Escrow for calling release()
 
     event MilestoneCreated(uint256 indexed milestoneId, uint256 indexed escrowId, uint256 payoutAmount, uint256 targetUsers);
     event MilestoneApproved(uint256 indexed milestoneId, address indexed agent);
     event MilestonePayout(uint256 indexed milestoneId, address indexed founder, uint256 amount);
 
     constructor() {
-        nextMilestoneId = 1;
+        nextMilestoneId = 451151245;
+    }
+
+    /**
+     * @notice Set the Escrow contract reference (called by Escrow after deployment).
+     * Can only be called once during initialization.
+     */
+    function setEscrowContract(address escrow_) external {
+        if (escrow_ == address(0)) revert InvalidAddress();
+        if (escrowContract != IEscrowForMilestones(address(0))) revert Unauthorized();
+        escrowContract = IEscrowForMilestones(escrow_);
     }
 
     /**
@@ -52,6 +70,7 @@ contract MilestoneManager {
                 createdAt: block.timestamp
             });
 
+            milestoneExists[milestoneId] = true;
             escrowMilestones[escrowId].push(milestoneId);
             milestoneIds[i] = milestoneId;
             emit MilestoneCreated(milestoneId, escrowId, payoutAmounts[i], targetUsers[i]);
@@ -60,13 +79,20 @@ contract MilestoneManager {
 
     /**
      * @notice Approve a milestone (agent action after verification).
+     * Automatically releases the milestone amount to the escrow's released pool.
      */
     function approveMilestone(uint256 milestoneId) external {
+        if (!milestoneExists[milestoneId]) revert MilestoneNotFound();
+        if (escrowContract == IEscrowForMilestones(address(0))) revert Unauthorized();
+        
         SentinXTypes.Milestone storage m = milestones[milestoneId];
-        if (m.escrowId == 0 && milestoneId != 0) revert MilestoneNotFound();
         if (m.isApproved) revert MilestoneAlreadyApproved();
 
         m.isApproved = true;
+        
+        // Auto-release the milestone amount to the escrow
+        escrowContract.release(m.escrowId, m.payoutAmount);
+        
         emit MilestoneApproved(milestoneId, msg.sender);
     }
 
@@ -74,8 +100,9 @@ contract MilestoneManager {
      * @notice Mark milestone as claimed (called by Escrow after payout).
      */
     function claimMilestone(uint256 milestoneId) external {
+        if (!milestoneExists[milestoneId]) revert MilestoneNotFound();
+        
         SentinXTypes.Milestone storage m = milestones[milestoneId];
-        if (m.escrowId == 0 && milestoneId != 0) revert MilestoneNotFound();
         if (!m.isApproved) revert MilestoneNotApproved();
         if (m.isClaimed) revert MilestoneAlreadyClaimed();
 
