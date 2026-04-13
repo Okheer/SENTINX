@@ -1,0 +1,35 @@
+{
+  "name": "sentinx-agent",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "node --experimental-vm-modules node_modules/.bin/jest --forceExit",
+    "start": "node index.js"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "transform": {},
+    "moduleFileExtensions": [
+      "js",
+      "mjs"
+    ],
+    "testMatch": [
+      "**/tests/**/*.test.js"
+    ],
+    "moduleDirectories": [
+      "node_modules",
+      "agent"
+    ],
+    "roots": [
+      "<rootDir>"
+    ]
+  },
+  "dependencies": {
+    "ethers": "^6.11.0",
+    "dotenv": "^16.0.0",
+    "node-fetch": "^3.3.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}

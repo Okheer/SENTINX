@@ -1,54 +1,75 @@
-import { checkDiversity } from './services/diversity.js';
+import { checkWalletDiversity } from './services/diversity.js';
 import { pinEvidenceToIPFS } from './utils/ipfsClient.js';
 import { issueOnchainAttestation } from './services/guardian.js';
 
 async function runSentinel(walletList) {
-    console.log(`🚀 Starting Milestone Verification for ${walletList.length} addresses...`);
+    console.log(`🚀 Starting Strict Milestone Verification for ${walletList.length} addresses...`);
+    console.log(`=========================================`);
     
-    let stats = { humans: 0, bots: 0 };
+    // --- STAGE 1: THE AUDIT (No gas spent, no IPFS pinning) ---
+    console.log("🧐 STAGE 1: Auditing all addresses for bot activity...");
+    const auditReports = [];
 
     for (const targetWallet of walletList) {
-        console.log(`\n-----------------------------------------`);
-        console.log(`🔍 Analyzing: ${targetWallet}`);
+        console.log(`\n🔍 Analyzing: ${targetWallet}`);
         
         try {
-            // 1. Analyze (Role B's Logic)
-            const report = await checkDiversity(targetWallet);
+            // Call Person B's actual function
+            const report = await checkWalletDiversity(targetWallet);
             
-            if (report.isHuman) {
-                console.log("🌟 Human detected!");
-                
-                // 2. Upload to IPFS (One time only!)
-                const cidUri = await pinEvidenceToIPFS(report.report); 
-                console.log(`🔒 Evidence locked at: ${cidUri}`);
-
-                // 3. On-chain Attestation (Role D's TEE/Ethers Logic)
-                console.log("⚡ Triggering Guardian to sign...");
-                const txHash = await issueOnchainAttestation(targetWallet, cidUri);
-                
-                console.log(`✅ Success! Hash: ${txHash}`);
-                stats.humans++;
-            } else {
-                console.log("🤖 Potential bot detected. Skipping attestation.");
-                stats.bots++;
+            // Check her specific 'passed' boolean
+            if (!report.passed) {
+                console.error(`🛑 CRITICAL FAILURE: Wallet ${targetWallet} flagged as a BOT (Score: ${report.score}/100).`);
+                console.log("❌ Entire batch rejected. No transactions will be sent. VC funds protected.");
+                return; // 👈 THIS ABORTS THE ENTIRE PROCESS IMMEDIATELY
             }
+            
+            console.log(`🌟 Human detected! (Score: ${report.score}/100)`);
+            
+            // Save the report so we don't have to fetch it again
+            auditReports.push({ wallet: targetWallet, data: report });
+
         } catch (error) {
-            console.error(`❌ Error processing ${targetWallet}:`, error.message);
+            console.error(`⚠️ Network Error auditing ${targetWallet}:`, error.message);
+            console.log("❌ Aborting batch due to scanning error.");
+            return; 
+        }
+    }
+
+    // --- STAGE 2: THE EXECUTION (Only runs if ALL passed Stage 1) ---
+    console.log(`\n=========================================`);
+    console.log("✨ STAGE 2: All addresses passed! Starting On-chain Attestation...");
+    
+    let successCount = 0;
+
+    for (const entry of auditReports) {
+        console.log(`\n⚙️ Processing Execution for: ${entry.wallet}`);
+        try {
+            // 1. Upload the full proof data to IPFS (Role D logic)
+            const cidUri = await pinEvidenceToIPFS(entry.data); 
+            console.log(`🔒 Evidence locked at: ${cidUri}`);
+
+            // 2. On-chain Attestation (Role D logic)
+            console.log("⚡ Triggering Guardian to sign...");
+            const txHash = await issueOnchainAttestation(entry.wallet, cidUri);
+            
+            console.log(`✅ Success! Hash: ${txHash}`);
+            successCount++;
+        } catch (error) {
+            console.error(`❌ Critical error during execution for ${entry.wallet}:`, error.message);
         }
     }
 
     console.log(`\n=========================================`);
     console.log(`🏁 BATCH COMPLETE`);
-    console.log(`✅ Humans Verified: ${stats.humans}`);
-    console.log(`🚫 Bots Rejected: ${stats.bots}`);
+    console.log(`🏆 Successfully Verified & Minted: ${successCount} / ${walletList.length}`);
     console.log(`=========================================`);
 }
 
-// Example: The list the Founder would submit via the Frontend
+// Demo Data: Vitalik's address (will pass) and a Zero address (will fail)
 const founderSubmission = [
-    "0x94A4365E6B7E79791258A3Fa071824BC2b75a394", 
-    "0x742d35Cc6634C0532925a3b844Bc454e4438f44e", // Random test wallet
-    "0x0000000000000000000000000000000000000000"  // Should fail
+    "0x57C7f2F3051928E2cc7C871Bac590bF1d4BF4c8e", // Vitalik - Should Pass
+    "0x94A4365E6B7E79791258A3Fa071824BC2b75a394"  // Bot/Empty - Should Fail & Abort Batch
 ];
 
 runSentinel(founderSubmission);
