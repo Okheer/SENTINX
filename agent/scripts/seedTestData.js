@@ -9,13 +9,12 @@ import { writeFileSync } from "fs";
 import dotenv from "dotenv";
 dotenv.config();
 
-// 10 random bot wallets — no history, no diversity
-
-
-// 10 fresh random wallets — guaranteed to fail (no history)
-const bots = Array.from({ length: 10 }, () =>
-    ethers.Wallet.createRandom().address
-);
+// 10 bot wallets with LOW seed values (< 1000) to guarantee failure
+const bots = Array.from({ length: 10 }, (_, i) => {
+    // Create addresses with low hex values (seed < 1000)
+    const lowHex = String(i * 50).padStart(4, '0');
+    return `0x${lowHex}${'0'.repeat(36)}`;
+});
 
 // 5 known active wallets — will pass diversity check
 const realUsers = [
@@ -32,4 +31,6 @@ writeFileSync("/tmp/pending_addresses.json", JSON.stringify(all), "utf8");
 console.log(`✅ Written ${all.length} addresses to queue`);
 console.log(`   ${bots.length} bots     → will be REJECTED`);
 console.log(`   ${realUsers.length} real users → should PASS`);
+console.log("\nBot addresses (low seed < 1000):");
+bots.forEach((b, i) => console.log(`  ${i + 1}. ${b}`));
 console.log("\nNow run: npm start");

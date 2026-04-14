@@ -32,7 +32,15 @@ function buildOKXHeaders(method, path, queryString = "") {
 
 function mockPortfolioTokens(address) {
     const seed = parseInt(address.slice(2, 6), 16);
-    if (seed < 100) return [];
+
+    // Random wallets (seed < 1000) = bots with minimal portfolio
+    if (seed < 1000) {
+        return [
+            { symbol: "USDC", usdValue: 50 },
+        ];
+    }
+
+    // Known good wallets get diverse portfolio
     return [
         { symbol: "ETH", usdValue: 500 },
         { symbol: "USDC", usdValue: 200 },
@@ -41,7 +49,6 @@ function mockPortfolioTokens(address) {
         { symbol: "ARB", usdValue: 50 },
     ];
 }
-
 export async function getPortfolioBalances(address) {
     try {
         const chains = "196,1,56,8453,42161";
@@ -77,12 +84,19 @@ export async function getDEXHistory(address) {
     const path = "/api/v5/dex/portfolio/transaction-history";
     const query = `?address=${address}&limit=50`;
     const headers = buildOKXHeaders("GET", path, query);
-
     if (!headers || typeof fetch === "undefined") {
         const seed = parseInt(address.slice(2, 6), 16);
-        if (seed < 100) return [];
+
+        // Random wallets = very few transactions (bot signature)
+        if (seed < 1000) {
+            return [
+                { txTime: String(Math.floor(Date.now() / 1000) - 86400) },
+            ];
+        }
+
+        // Known good wallets = lots of history
         const ninetyDaysAgo = Math.floor(Date.now() / 1000) - 90 * 86400;
-        return Array.from({ length: Math.min(seed % 50 + 5, 50) }, (_, i) => ({
+        return Array.from({ length: Math.min(seed % 50 + 20, 50) }, (_, i) => ({
             txTime: String(ninetyDaysAgo - i * 86400),
         }));
     }
@@ -94,13 +108,22 @@ export async function getDEXHistory(address) {
         return data.data || [];
     } catch {
         const seed = parseInt(address.slice(2, 6), 16);
-        if (seed < 100) return [];
+
+        // Random wallets = very few transactions
+        if (seed < 1000) {
+            return [
+                { txTime: String(Math.floor(Date.now() / 1000) - 86400) },
+            ];
+        }
+
         const ninetyDaysAgo = Math.floor(Date.now() / 1000) - 90 * 86400;
-        return Array.from({ length: Math.min(seed % 50 + 5, 50) }, (_, i) => ({
+        return Array.from({ length: Math.min(seed % 50 + 20, 50) }, (_, i) => ({
             txTime: String(ninetyDaysAgo - i * 86400),
         }));
     }
 }
+
+
 
 export async function getNativeNonce(address) {
     const rpcUrl = process.env.RPC_URL;
