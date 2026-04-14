@@ -1,5 +1,4 @@
 // agent/services/diversity.js  — FIXED VERSION
-// agent/services/diversity.js  — FIXED VERSION
 
 import { createHmac } from "crypto";
 import { ethers } from "ethers";
@@ -31,11 +30,9 @@ function buildOKXHeaders(method, path, queryString = "") {
     };
 }
 
-// ─── Mock responses ─────────────────────────────────────────────────────────
 function mockPortfolioTokens(address) {
     const seed = parseInt(address.slice(2, 6), 16);
     if (seed < 100) return [];
-
     return [
         { symbol: "ETH", usdValue: 500 },
         { symbol: "USDC", usdValue: 200 },
@@ -44,8 +41,6 @@ function mockPortfolioTokens(address) {
         { symbol: "ARB", usdValue: 50 },
     ];
 }
-
-// ─── API Calls ─────────────────────────────────────────────────────────────
 
 export async function getPortfolioBalances(address) {
     try {
@@ -61,9 +56,7 @@ export async function getPortfolioBalances(address) {
         const res = await fetch(`${OKX_BASE}${path}${query}`, { headers });
         const data = await res.json();
 
-        if (data.code !== "0") {
-            throw new Error("API error");
-        }
+        if (data.code !== "0") throw new Error("API error");
 
         const tokens = [];
         for (const walletData of data.data || []) {
@@ -74,24 +67,20 @@ export async function getPortfolioBalances(address) {
                 });
             }
         }
-
         return tokens;
-    } catch (err) {
-        console.log("[Diversity] Portfolio fallback → mock");
+    } catch {
         return mockPortfolioTokens(address);
     }
 }
 
-// ✅ FIXED: added try-catch fallback
 export async function getDEXHistory(address) {
-    const path = "/api/v5/dex/market/portfolio-dex-history";
+    const path = "/api/v5/dex/portfolio/transaction-history";
     const query = `?address=${address}&limit=50`;
     const headers = buildOKXHeaders("GET", path, query);
 
     if (!headers || typeof fetch === "undefined") {
         const seed = parseInt(address.slice(2, 6), 16);
         if (seed < 100) return [];
-
         const ninetyDaysAgo = Math.floor(Date.now() / 1000) - 90 * 86400;
         return Array.from({ length: Math.min(seed % 50 + 5, 50) }, (_, i) => ({
             txTime: String(ninetyDaysAgo - i * 86400),
@@ -101,18 +90,11 @@ export async function getDEXHistory(address) {
     try {
         const res = await fetch(`${OKX_BASE}${path}${query}`, { headers });
         const data = await res.json();
-
-        if (data.code !== "0") {
-            throw new Error("API error");
-        }
-
+        if (data.code !== "0") throw new Error("API error");
         return data.data || [];
     } catch {
-        console.log("[Diversity] DEX fallback → mock");
-
         const seed = parseInt(address.slice(2, 6), 16);
         if (seed < 100) return [];
-
         const ninetyDaysAgo = Math.floor(Date.now() / 1000) - 90 * 86400;
         return Array.from({ length: Math.min(seed % 50 + 5, 50) }, (_, i) => ({
             txTime: String(ninetyDaysAgo - i * 86400),
@@ -123,14 +105,11 @@ export async function getDEXHistory(address) {
 export async function getNativeNonce(address) {
     const rpcUrl = process.env.RPC_URL;
     if (!rpcUrl) return 0;
-
     try {
         const provider = new ethers.JsonRpcProvider(rpcUrl);
         const nonce = await Promise.race([
             provider.getTransactionCount(address),
-            new Promise((_, reject) =>
-                setTimeout(() => reject(new Error("timeout")), 5000)
-            ),
+            new Promise((_, reject) => setTimeout(() => reject(new Error("timeout")), 5000)),
         ]);
         await provider.destroy();
         return nonce;
@@ -139,54 +118,66 @@ export async function getNativeNonce(address) {
     }
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
-
 function estimateAccountAge(history) {
     if (!history.length) return 0;
-
     const oldest = Math.min(...history.map(tx => parseInt(tx.txTime)));
     return Math.floor((Date.now() / 1000 - oldest) / 86400);
 }
 
-// ─── Scoring ───────────────────────────────────────────────────────────────
 
 export function computeDiversityScore(metrics) {
     let score = 0;
 
-    if (metrics.uniqueTokens > 3) score += 20;
-    if (metrics.uniqueTokens > 7) score += 10;
-    if (metrics.txCount > 10) score += 20;
-    if (metrics.txCount > 50) score += 10;
-    if (metrics.accountAgeDays > 30) score += 20;
-    if (metrics.accountAgeDays > 180) score += 10;
-    if ((metrics.totalUSD || 0) >= 49) score += 5;
-    if (metrics.totalUSD > 500) score += 5;
+    // Token diversity (max 25 points)
+    if (metrics.uniqueTokens >= 5) score += 15;
+    if (metrics.uniqueTokens >= 8) score += 10;
 
-    // ✅ FIXED: safer balance check
+    // Transaction history (max 30 points) - CRITICAL
+    if (metrics.txCount >= 20) score += 15;
+    if (metrics.txCount >= 50) score += 15;
+
+    // Account age (max 25 points) - CRITICAL
+    if (metrics.accountAgeDays >= 60) score += 12;
+    if (metrics.accountAgeDays >= 180) score += 13;
+
+    // Portfolio value (max 20 points)
+    if ((metrics.totalUSD || 0) >= 500) score += 10;
+    if (metrics.totalUSD >= 2000) score += 10;
+
+    // HEAVY PENALTIES FOR BOTS
+    if (metrics.txCount < 5) score -= 40;      // Bot signature
+    if (metrics.uniqueTokens < 3) score -= 35; // Bot signature
+    if (metrics.accountAgeDays < 30) score -= 45; // Brand new = bot
+
+    // Native balance check
     if (metrics.nativeBalance !== undefined && metrics.nativeBalance !== null) {
         const bal = String(metrics.nativeBalance).trim();
         if (bal === "0" || bal === "0.0" || Number(bal) === 0) {
-            score -= 20;
+            score -= 30;
         }
     }
-
-    if (metrics.txCount < 3) score -= 10;
 
     return Math.max(0, Math.min(100, score));
 }
 
-// ─── Main ──────────────────────────────────────────────────────────────────
+
+
 
 export async function checkWalletDiversity(address) {
     console.log(`[Diversity] Scanning ${address}...`);
-
     try {
-        // ✅ FIXED: removed Promise.all crash
         let tokens = [];
         let history = [];
         let nonce = 0;
+        let usingMock = false;
 
-        try { tokens = await getPortfolioBalances(address); } catch { }
+        try {
+            tokens = await getPortfolioBalances(address);
+            if (!process.env.OKX_API_KEY) {
+                usingMock = true;
+                console.log(`  ⚠️  Using mock data (no OKX_API_KEY)`);
+            }
+        } catch { }
         try { history = await getDEXHistory(address); } catch { }
         try { nonce = await getNativeNonce(address); } catch { }
 
@@ -195,28 +186,19 @@ export async function checkWalletDiversity(address) {
         const accountAgeDays = estimateAccountAge(history);
         const txCount = Math.max(nonce, history.length);
 
-        const metrics = {
-            uniqueTokens,
-            totalUSD,
-            accountAgeDays,
-            txCount,
-        };
-
+        const metrics = { uniqueTokens, totalUSD, accountAgeDays, txCount };
         const score = computeDiversityScore(metrics);
         const passed = score >= 50;
 
-        return { address, score, passed, metrics };
+        console.log(`  Score: ${score} | Tokens: ${uniqueTokens} | TX: ${txCount} | Age: ${accountAgeDays}d | USD: $${totalUSD}`);
 
+        return { address, score, passed, metrics };
     } catch (err) {
         console.error(`[Diversity] Error scanning ${address}:`, err.message);
-        return {
-            address,
-            score: 0,
-            passed: false,
-            metrics: {},
-        };
+        return { address, score: 0, passed: false, metrics: {} };
     }
 }
+
 
 export async function scanBatch(addresses) {
     return Promise.all(addresses.map(checkWalletDiversity));

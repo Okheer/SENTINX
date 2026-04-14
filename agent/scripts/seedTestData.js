@@ -6,6 +6,11 @@
 // scripts/seedTestData.js
 import { ethers } from "ethers";
 import { writeFileSync } from "fs";
+import dotenv from "dotenv";
+dotenv.config();
+
+// 10 random bot wallets — no history, no diversity
+
 
 // 10 fresh random wallets — guaranteed to fail (no history)
 const bots = Array.from({ length: 10 }, () =>
