@@ -1,0 +1,56 @@
+/* ============================================
+   ACL TABLE
+   ============================================ */
+
+.acl-table {
+    overflow-x: auto;
+}
+
+.acl-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85rem;
+}
+
+.acl-table th {
+    background: rgba(30, 41, 59, 0.7);
+    padding: 0.75rem;
+    text-align: left;
+    font-weight: 600;
+    color: var(--color-primary);
+    border-bottom: 2px solid var(--color-border);
+}
+
+.acl-table td {
+    padding: 0.75rem;
+    border-bottom: 1px solid var(--color-border);
+    color: var(--color-text-primary);
+}
+
+.acl-table tbody tr:hover {
+    background: rgba(99, 102, 241, 0.05);
+}
+
+.acl-allow {
+    color: var(--color-success);
+    font-weight: 600;
+}
+
+.acl-deny {
+    color: var(--color-text-muted);
+}
+
+/* ============================================
+   RESPONSIVE
+   ============================================ */
+
+@media (max-width: 768px) {
+    .acl-table table {
+        font-size: 0.7rem;
+    }
+
+    .acl-table th,
+    .acl-table td {
+        padding: 0.5rem;
+    }
+}
