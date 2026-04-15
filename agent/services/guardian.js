@@ -9,8 +9,8 @@ export async function issueOnchainAttestation(targetUserAddress, ipfsCid) {
         const provider = new ethers.JsonRpcProvider("https://testrpc.xlayer.tech");
 
         // 2. Initialize the Wallet using native Ethers.js and your private key
-        const privateKey = process.env.PRIVATE_KEY;
-        if (!privateKey) throw new Error("Missing PRIVATE_KEY in .env file!");
+        const privateKey = process.env.DEPLOYER_PRIVATE_KEY;
+        if (!privateKey) throw new Error("Missing DEPLOYER_PRIVATE_KEY in .env file!");
         
         const agenticWallet = new ethers.Wallet(privateKey, provider);
 

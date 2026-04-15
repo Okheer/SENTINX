@@ -1,4 +1,4 @@
-// agent/index.js
+
 // SENTINX Sentry Agent — main autonomous loop.
 // Polls for new founder submissions, scans them, attests approved ones,
 // triggers milestone release when threshold is met.
@@ -8,28 +8,50 @@ dotenv.config();
 
 import { scanBatch } from "./services/diversity.js";
 import { attestBatch, getVerifiedCount } from "./services/attestation.js";
-import { deployToYield, returnFromYield, estimateYield } from "./services/yield.js";
+import { deployToYield } from "./services/yieldHunter.js";
+import { runDecisionEngineCycle } from "./services/decision-engine.js";
 import { ethers } from "ethers";
 
-// ─── Config ────────────────────────────────────────────────────────────────
 const LOOP_INTERVAL_MS = 30_000;   // poll every 30 seconds
-const VERIFIED_THRESHOLD = 50;      // release tranche when 50 users verified
-const YIELD_DEPLOY_RATIO = 0.80;    // deploy 80% of idle USDC to yield
+const VERIFIED_THRESHOLD = 2;       // release tranche when 2 users verified (DEMO MODE)
 
-// ─── Escrow interaction ────────────────────────────────────────────────────
-const provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
-const sentryWallet = new ethers.Wallet(process.env.SENTRY_PRIVATE_KEY, provider);
+
+const OKB_INVESTMENT_ID = 33913;     // OKB DeFi product on X Layer
+const INVESTMENT_TOKEN = "OKB";      // Token to invest
+const MIN_BALANCE_ETH = "0.01";      // Minimum balance to trigger investment (in ETH units)
+const INVESTMENT_AMOUNT = "0.01";    // Amount to invest (in human-readable form)
+
+let _provider = null;
+let _sentryWallet = null;
+
+function getProvider() {
+    if (!_provider) {
+        const rpcUrl = process.env.RPC_URL || "https://testrpc.xlayer.tech";
+        _provider = new ethers.JsonRpcProvider(rpcUrl);
+    }
+    return _provider;
+}
+
+function getSentryWallet() {
+    if (!_sentryWallet) {
+        if (!process.env.SENTRY_PRIVATE_KEY) {
+            throw new Error("SENTRY_PRIVATE_KEY not set in .env");
+        }
+        _sentryWallet = new ethers.Wallet(process.env.SENTRY_PRIVATE_KEY, getProvider());
+    }
+    return _sentryWallet;
+}
 
 const ESCROW_ABI = [
-    "function releaseTranche() external",
-    "function state() view returns (uint8)",
-    "function getIdleBalance() view returns (uint256)",
-    "function getVerifiedCount() view returns (uint256)",
+    "function approveMilestone(uint256 milestoneId) external",
+    "function getEscrowState(uint256 escrowId) view returns (uint8)",
+    "function getEscrowGrants(uint256 escrowId) view returns (address grantToken, uint256 grantTotal, uint256 grantReleased, address equityToken, uint256 equityTotal, uint256 equityReleased)",
+    "function getVerifiedCount() view returns (uint256)", 
 ];
 
 function getEscrow() {
     return new ethers.Contract(
-        process.env.SENTINX_ESCROW_ADDRESS, ESCROW_ABI, sentryWallet
+        process.env.SENTINX_ESCROW_ADDRESS, ESCROW_ABI, getSentryWallet()
     );
 }
 
@@ -37,7 +59,7 @@ function getEscrow() {
 // In production: this comes from a smart contract event or an API.
 // For Day 2 demo: load from a JSON file that Person C's frontend writes to.
 let pendingAddresses = [];
-let deployedUSDC = 0n;
+let isDeploying = false;  // State lock to prevent duplicate yield deployments
 
 /**
  * Load pending addresses from the shared queue.
@@ -70,66 +92,100 @@ async function runCycle() {
 
             // ── 2. Diversity scan ──────────────────────────────────────────────
             const scanResults = await scanBatch(newAddresses);
-            const passCount = scanResults.filter(r => r.passed).length;
+            
+            // Extract ONLY the ones that passed
+            const passedOnes = scanResults.filter(r => r.passed);
+            
             console.log(
-                `[Sentry] Scan: ${passCount}/${scanResults.length} passed diversity check`
+                `[Sentry] Scan: ${passedOnes.length}/${scanResults.length} passed diversity check.`
             );
 
             // ── 3. Attest passed users on-chain ───────────────────────────────
-            if (passCount > 0) {
-                const { attested, rejected, errors } = await attestBatch(scanResults);
+            if (passedOnes.length > 0) {
+                console.log(`[Sentry] Attesting ${passedOnes.length} verified users...`);
+              
+                const { attested, rejected, errors } = await attestBatch(passedOnes);
+              
                 console.log(
-                    `[Sentry] Attested: ${attested.length} | ` +
-                    `Rejected: ${rejected.length} | Errors: ${errors.length}`
+                    `[Sentry] Attested: ${attested?.length || 0} | ` +
+                    `Rejected: ${rejected?.length || 0} | Errors: ${errors?.length || 0}`
                 );
             }
 
-            // Clear the queue (in production: mark as processed in DB)
             const { writeFileSync } = await import("fs");
             writeFileSync("/tmp/pending_addresses.json", "[]", "utf8");
         }
 
-        // ── 4. Check verified count → milestone trigger ────────────────────
+        // ── 4. Check verified count → milestone trigger 
         if (process.env.IDENTITY_REGISTRY_ADDRESS) {
             const verifiedCount = await getVerifiedCount();
             console.log(`[Sentry] Verified users on-chain: ${verifiedCount}`);
 
             if (verifiedCount >= VERIFIED_THRESHOLD) {
-                console.log(`[Sentry] 🎯 Threshold reached! Triggering milestone release...`);
-
-                // Pull capital back from yield before release
-                if (deployedUSDC > 0n) {
-                    await returnFromYield(deployedUSDC);
-                    deployedUSDC = 0n;
-                }
+                console.log(`[Sentry] Threshold reached! Triggering milestone approval...`);
 
                 const escrow = getEscrow();
-                const tx = await escrow.releaseTranche();
+                // NECESSARY CHANGE: Calling approveMilestone(1) instead of releaseTranche()
+                const tx = await escrow.approveMilestone(1); 
                 await tx.wait();
-                console.log(`[Sentry] ✅ Milestone tranche released: ${tx.hash}`);
+                console.log(`[Sentry] ✅ Milestone 1 Approved! Founder can now claim funds. Hash: ${tx.hash}`);
             }
         }
 
-        // ── 5. Yield management: deploy idle capital ───────────────────────
-        if (process.env.SENTINX_ESCROW_ADDRESS && deployedUSDC === 0n) {
+        // ── 4.5. DECISION ENGINE: Run autonomous yield/milestone operations ───
+        // This replaces the old yield management logic with the new decision engine
+        if (process.env.MOCK_ROUTER_ADDRESS) {
+            console.log("[Sentry] Running Decision Engine cycle...");
             try {
-                const escrow = getEscrow();
-                const idleBalance = await escrow.getIdleBalance();
+                await runDecisionEngineCycle();
+            } catch (err) {
+                console.error("[Sentry] Decision Engine error:", err.message);
+            }
+        }
 
-                if (idleBalance > ethers.parseUnits("10", 6)) { // min 10 USDC to deploy
-                    const deployAmount = (idleBalance * BigInt(Math.floor(YIELD_DEPLOY_RATIO * 100))) / 100n;
-                    await deployToYield(deployAmount);
-                    deployedUSDC = deployAmount;
+        // ── 5. Yield management: deploy idle capital to DeFi
+        if (process.env.SENTINX_ESCROW_ADDRESS && !isDeploying) {
+            try {
+                // Check for native token balance (not USDC)
+                const nativeBalance = await getProvider().getBalance(getSentryWallet().address);
+                const minBalance = ethers.parseEther(MIN_BALANCE_ETH);
 
-                    // Estimate yield earned so far
-                    const { earnedUSD, yieldPct } = await estimateYield(deployedUSDC);
+                console.log(
+                    `[Sentry] 💰 Native token balance: ${ethers.formatEther(nativeBalance)} ETH`
+                );
+
+                if (nativeBalance >= minBalance) {
                     console.log(
-                        `[Sentry] 💰 Yield: $${earnedUSD.toFixed(4)} earned (${yieldPct.toFixed(4)}%)`
+                        `[Sentry] 🎯 Balance threshold reached! ` +
+                        `Deploying ${INVESTMENT_AMOUNT} ${INVESTMENT_TOKEN} to DeFi...`
                     );
+
+                    isDeploying = true;
+
+                    try {
+                        const success = await deployToYield(
+                            INVESTMENT_AMOUNT,
+                            OKB_INVESTMENT_ID,
+                            INVESTMENT_TOKEN,
+                            getSentryWallet().address
+                        );
+
+                        if (success) {
+                            console.log(
+                                `[Sentry] ✅ DeFi investment successful!`
+                            );
+                        } else {
+                            console.error("[Sentry] DeFi investment failed - see logs above for details");
+                        }
+                    } finally {
+    
+                        isDeploying = false;
+                    }
                 }
             } catch (err) {
                 // Yield errors should not crash the main loop
                 console.error("[Sentry] Yield management error:", err.message);
+                isDeploying = false;
             }
         }
 

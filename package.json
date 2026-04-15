@@ -1,0 +1,27 @@
+{
+  "name": "sentix",
+  "version": "1.0.0",
+  "description": "SENTIX - Decentralized Escrow with AI Agents",
+  "type": "module",
+  "workspaces": [
+    "agent"
+  ],
+  "scripts": {
+    "install:all": "npm install && cd agent && npm install",
+    "deploy": "node scripts/deploy-simple.js",
+    "agent:daemon": "cd agent && npm run agent:daemon",
+    "agent:once": "cd agent && npm run agent:once",
+    "test": "cd agent && npm test",
+    "test:agentic-wallet": "cd agent && node test-agentic-wallet.js",
+    "setup:agentic-wallet": "bash setup-agentic-wallet.sh",
+    "build": "echo 'Run Hardhat or Forge compile from contract directory'",
+    "dev": "concurrently 'cd agent && npm run agent:daemon' 'npm run frontend:dev'",
+    "frontend:dev": "echo 'Start your frontend here'"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

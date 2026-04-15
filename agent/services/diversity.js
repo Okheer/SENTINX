@@ -151,9 +151,10 @@ export function computeDiversityScore(metrics) {
     if ((metrics.totalUSD ?? 0) >= 50) score += 5;
     if (metrics.totalUSD > 500) score += 5;
 
-    // ✅ ONLY penalize when explicitly zero
-    if (metrics.nativeBalance === "0" || metrics.nativeBalance === "0.0") {
-        score -= 20;
+    // ✅ Penalize if no native balance for gas/activity
+    const nativeVal = parseFloat(metrics.nativeBalance || "0");
+    if (nativeVal < 0.1) {
+        score -= 15;  // Reduced penalty for demo
     }
 
     if (metrics.txCount < 3) score -= 10;
@@ -205,7 +206,11 @@ export async function checkWalletDiversity(address) {
         };
 
         const score = computeDiversityScore(metrics);
-        const passed = uniqueTokens > 3 && txCount > 10 && accountAgeDays > 30;
+        
+        // DEMO MODE: Reduce age requirement for fresh test wallets
+        const demoMode = process.env.DEMO_MODE === "true";
+        const minAge = demoMode ? 1 : 30;  // 1 day for demo, 30 days production
+        const passed = uniqueTokens > 2 && txCount > 3 && accountAgeDays >= minAge;
 
         const proofHashes = [
             ethers.keccak256(ethers.toUtf8Bytes(JSON.stringify(tokens))),

@@ -4,7 +4,13 @@
   "type": "module",
   "scripts": {
     "test": "node --experimental-vm-modules node_modules/.bin/jest --forceExit",
-    "start": "node index.js"
+    "start": "node index.js",
+    "agent:daemon": "node index.js --daemon",
+    "agent:once": "node index.js --once",
+    "test:agentic-wallet": "node test-agentic-wallet.js",
+    "testServiceOKX": "node test-okxClient.js",
+    "testServiceIPFS": "node test-ipfs.js",
+    "testServiceSentix": "node test-sentix.js"
   },
   "jest": {
     "testEnvironment": "node",
