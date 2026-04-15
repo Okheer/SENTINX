@@ -1,130 +1,114 @@
 // agent/services/attestation.js
-// TEE-backed signing + on-chain identity stamping.
-// The "TEE" in this hackathon = the SENTRY_PRIVATE_KEY stored in .env.
-// In production it would live inside a hardware enclave (Gramine/Phala).
-
-// agent/services/attestation.js
-// TEE-backed signing + on-chain identity stamping.
-
 import { ethers } from "ethers";
+import { exec } from "child_process";
+import util from "util";
+import dotenv from "dotenv";
 
-// ─── Dynamic Dependency Loading ─────────────────────────────────────────────
-// This ensures the service works even if Person D hasn't finished IPFS utils.
-let uploadToIPFS = async () => "QmMockCID";
+dotenv.config();
+const execAsync = util.promisify(exec);
+
+// ─── Dynamic Dependency Loading (Safety Net) ──────────────────────────────
+let uploadToIPFS = async () => "QmMockCID_" + Date.now();
 let buildAuditJSON = (address, metrics, signature) => ({
-    address,
-    metrics,
-    signature,
+    address, metrics, signature, timestamp: new Date().toISOString()
 });
 
 async function loadDependencies() {
     try {
-        // Use dynamic import for ES Modules compatibility
         const ipfs = await import("../utils/ipfsClient.js");
-        uploadToIPFS = ipfs.uploadToIPFS;
-        buildAuditJSON = ipfs.buildAuditJSON;
+        if (ipfs.uploadToIPFS) uploadToIPFS = ipfs.uploadToIPFS;
+        if (ipfs.buildAuditJSON) buildAuditJSON = ipfs.buildAuditJSON;
     } catch (err) {
-        // Fallback stays active if file doesn't exist yet
+        console.log("[Attestation] Using built-in fallback for IPFS/Audit.");
     }
 }
 loadDependencies();
 
-// ─── Setup ─────────────────────────────────────────────────────────────────
-let provider = null;
-if (process.env.RPC_URL) {
-    provider = new ethers.JsonRpcProvider(process.env.RPC_URL);
+// ─── Setup Read-Only Provider ─────────────────────────────────────────────
+function getProvider() {
+    const rpcUrl = process.env.RPC_URL || "https://testrpc.xlayer.tech";
+    return new ethers.JsonRpcProvider(rpcUrl);
 }
 
-// Ensure private key exists to prevent crash on startup
-const privateKey = process.env.SENTRY_PRIVATE_KEY || "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-
-const sentryWallet = new ethers.Wallet(
-    privateKey,
-    provider || undefined
-);
-
+// Ensure registry ABI matches your smart contract exactly
 const REGISTRY_ABI = [
     "function issueAttestation(address _user, string memory _cid) external",
-    "function isVerified(address) view returns (bool)",
-    "function auditTrail(address) view returns (string)",
-    "function getVerifiedCount() view returns (uint256)",
+    "function attest(address user, string metadata) external", 
+    "function isRegistered(address user) view returns (bool)",
+    "function getVerifiedCount() view returns (uint256)"
 ];
 
-function getRegistry() {
+function getRegistryReadOnly() {
     if (!process.env.IDENTITY_REGISTRY_ADDRESS) {
-        throw new Error("IDENTITY_REGISTRY_ADDRESS not set in .env — ask Person A");
+        throw new Error("IDENTITY_REGISTRY_ADDRESS not set in .env");
     }
     return new ethers.Contract(
         process.env.IDENTITY_REGISTRY_ADDRESS,
         REGISTRY_ABI,
-        sentryWallet
+        getProvider()
     );
 }
 
-// ─── TEE Signature Logic ───────────────────────────────────────────────────
-
-export async function createAttestationSignature(userAddress, ipfsCID) {
-    // Standardize address to prevent checksum mismatches
-    const cleanAddress = ethers.getAddress(userAddress);
-
-    const messageHash = ethers.solidityPackedKeccak256(
-        ["address", "string"],
-        [cleanAddress, ipfsCID]
-    );
-
-    // signMessage handles the "\x19Ethereum Signed Message:\n32" prefix
-    const signature = await sentryWallet.signMessage(
-        ethers.getBytes(messageHash)
-    );
-
-    return { messageHash, signature };
-}
+// ─── Core Attestation Logic ───────────────────────────────────────────────
 
 export async function attestUser(scanResult) {
     const { address, metrics, proofHashes } = scanResult;
 
     if (!scanResult.passed) {
-        throw new Error(`Cannot attest ${address}: diversity check failed (score ${scanResult.score})`);
-    }
-    if (!process.env.IDENTITY_REGISTRY_ADDRESS) {
-        throw new Error("IDENTITY_REGISTRY_ADDRESS not set in .env — cannot attest on-chain");
+        throw new Error(`Cannot attest ${address}: failed diversity check`);
     }
 
-    console.log(`[Attestation] Attesting ${address}...`);
+    console.log(`[Attestation] ✍️ Processing ${address}...`);
 
-    // Step 1: Build temporary evidence for signing
-    const evidence = buildAuditJSON(address, metrics, "PENDING_SIGNATURE");
+    // 1. Read-Only Check: Is user already registered?
+    const registry = getRegistryReadOnly();
+    try {
+        const alreadyRegistered = await registry.isRegistered(address);
+        if (alreadyRegistered) {
+            console.log(`[Attestation] ${address} already registered on-chain.`);
+            return { cid: "N/A", txHash: null, alreadyVerified: true };
+        }
+    } catch (err) {
+        console.warn(`[Attestation] Warning: Could not check isRegistered status. Assuming false.`);
+    }
 
-    // Step 2: Create deterministic hash for the signature
-    const tempCID = ethers.keccak256(
-        ethers.toUtf8Bytes(JSON.stringify(evidence))
-    ).slice(0, 46);
-
-    const { signature } = await createAttestationSignature(address, tempCID);
-
-    // Step 3: Build final evidence and upload
-    const finalEvidence = buildAuditJSON(
-        address,
-        { ...metrics, proofHashes },
-        signature
-    );
+    // 2. Prepare Data 
+    const finalEvidence = buildAuditJSON(address, { ...metrics, proofHashes }, "TEE_ATTESTED_VIA_ONCHAINOS");
     const cid = await uploadToIPFS(finalEvidence);
 
-    // Step 4: Write on-chain stamp
-    const registry = getRegistry();
+    // 3. Encode the transaction for the OnchainOS CLI
+    console.log(`[Attestation] Encoding transaction for TEE CLI...`);
+    const registryInterface = new ethers.Interface(REGISTRY_ABI);
+    
+    // NOTE: Change "issueAttestation" to "attest" if that is what your contract uses!
+    const encodedInputData = registryInterface.encodeFunctionData("issueAttestation", [
+        address,
+        cid
+    ]);
 
-    const alreadyVerified = await registry.isVerified(address);
-    if (alreadyVerified) {
-        console.log(`[Attestation] ${address} already verified, skipping.`);
-        return { cid, txHash: null, signature, alreadyVerified: true };
+    // 4. Execute via OnchainOS CLI (The Agentic Wallet)
+    const registryAddress = process.env.IDENTITY_REGISTRY_ADDRESS;
+    const executeCmd = `onchainos wallet contract-call --to ${registryAddress} --chain xlayer --input-data ${encodedInputData}`;
+
+    try {
+        const { stdout } = await execAsync(executeCmd);
+        
+        let txHash = "Check Block Explorer";
+        try {
+            const outputObj = JSON.parse(stdout);
+            if (outputObj.data && outputObj.data.txHash) {
+                txHash = outputObj.data.txHash;
+            }
+        } catch (e) {
+            txHash = stdout.trim().substring(0, 66); 
+        }
+
+        console.log(`[Attestation] ✅ TEE Execution Success! Output: ${txHash}`);
+        return { cid, txHash, alreadyVerified: false };
+
+    } catch (err) {
+        throw new Error(`CLI Execution Failed: ${err.message}`);
     }
-
-    const tx = await registry.issueAttestation(address, cid);
-    const receipt = await tx.wait();
-
-    console.log(`[Attestation] ✓ ${address} stamped on-chain. Tx: ${receipt.hash}`);
-
-    return { cid, txHash: receipt.hash, signature, alreadyVerified: false };
 }
 
 export async function attestBatch(scanResults) {
@@ -142,25 +126,26 @@ export async function attestBatch(scanResults) {
             const attestResult = await attestUser(result);
             attested.push({ address: result.address, ...attestResult });
         } catch (err) {
-            console.error(`[Attestation] Error for ${result.address}:`, err.message);
+            console.error(`[Attestation] ❌ Error for ${result.address}:`, err.message);
             errors.push({ address: result.address, error: err.message });
         }
-
-        // Delay to prevent nonce collisions on X Layer
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, 2000));
     }
 
     return { attested, rejected, errors };
 }
 
-export function getSentryAddress() {
-    return sentryWallet.address;
-}
-
 export async function getVerifiedCount() {
     try {
-        const registry = getRegistry();
+        const registry = getRegistryReadOnly();
         const count = await registry.getVerifiedCount();
         return Number(count);
     } catch (e) { return 0; }
 }
+
+// ─── Exported Utility for index.js ─────────────────────────────────────────
+export function getSentryAddress() { 
+    // This pulls your authorized agentic wallet address directly from your .env
+    return process.env.SENTRY_ADDRESS || "0x00223b332561f6eb2d640adea92c1fc891944f5f0"; 
+}
+

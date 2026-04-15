@@ -1,28 +1,36 @@
-
+// agent/index.js
 // SENTINX Sentry Agent — main autonomous loop.
-// Polls for new founder submissions, scans them, attests approved ones,
-// triggers milestone release when threshold is met.
+// Fully integrated with Frontend Bridge and Decision Engine.
 
 import dotenv from "dotenv";
 dotenv.config();
 
 import { scanBatch } from "./services/diversity.js";
-import { attestBatch, getVerifiedCount } from "./services/attestation.js";
-import { deployToYield } from "./services/yieldHunter.js";
+import { attestBatch, getVerifiedCount, getSentryAddress } from "./services/attestation.js";
 import { runDecisionEngineCycle } from "./services/decision-engine.js";
 import { ethers } from "ethers";
+import './server.js'; // Starts the API server
+import { agentState } from './server.js';
 
-const LOOP_INTERVAL_MS = 30_000;   // poll every 30 seconds
-const VERIFIED_THRESHOLD = 2;       // release tranche when 2 users verified (DEMO MODE)
+// ─── Console Hijack for Web Terminal ──────────────────────────────────────
+const originalLog = console.log;
+console.log = (...args) => {
+    originalLog(...args); 
+    const message = args.join(' ');
+    
+    agentState.logs.push({
+        time: new Date().toLocaleTimeString(),
+        msg: message,
+        type: message.includes('✅') ? 'success' : (message.includes('❌') ? 'error' : 'info')
+    });
 
+    if (agentState.logs.length > 50) agentState.logs.shift();
+};
 
-const OKB_INVESTMENT_ID = 33913;     // OKB DeFi product on X Layer
-const INVESTMENT_TOKEN = "OKB";      // Token to invest
-const MIN_BALANCE_ETH = "0.01";      // Minimum balance to trigger investment (in ETH units)
-const INVESTMENT_AMOUNT = "0.01";    // Amount to invest (in human-readable form)
+const LOOP_INTERVAL_MS = 30_000;   
+const VERIFIED_THRESHOLD = 2;       
 
 let _provider = null;
-let _sentryWallet = null;
 
 function getProvider() {
     if (!_provider) {
@@ -32,50 +40,30 @@ function getProvider() {
     return _provider;
 }
 
-function getSentryWallet() {
-    if (!_sentryWallet) {
-        if (!process.env.SENTRY_PRIVATE_KEY) {
-            throw new Error("SENTRY_PRIVATE_KEY not set in .env");
-        }
-        _sentryWallet = new ethers.Wallet(process.env.SENTRY_PRIVATE_KEY, getProvider());
-    }
-    return _sentryWallet;
-}
-
-const ESCROW_ABI = [
-    "function approveMilestone(uint256 milestoneId) external",
-    "function getEscrowState(uint256 escrowId) view returns (uint8)",
-    "function getEscrowGrants(uint256 escrowId) view returns (address grantToken, uint256 grantTotal, uint256 grantReleased, address equityToken, uint256 equityTotal, uint256 equityReleased)",
-    "function getVerifiedCount() view returns (uint256)", 
-];
-
-function getEscrow() {
-    return new ethers.Contract(
-        process.env.SENTINX_ESCROW_ADDRESS, ESCROW_ABI, getSentryWallet()
-    );
-}
-
-// ─── Queue of pending addresses ───────────────────────────────────────────
-// In production: this comes from a smart contract event or an API.
-// For Day 2 demo: load from a JSON file that Person C's frontend writes to.
-let pendingAddresses = [];
-let isDeploying = false;  // State lock to prevent duplicate yield deployments
-
-/**
- * Load pending addresses from the shared queue.
- * Person C writes founder-submitted addresses to /tmp/pending_addresses.json
- * Person B reads and processes them here.
- */
+// ─── Shared Queue Logic ───────────────────────────────────────────────────
 async function loadPendingAddresses() {
-    try {
-        const { readFileSync, existsSync } = await import("fs");
-        const path = "/tmp/pending_addresses.json";
-        if (!existsSync(path)) return [];
-        const raw = readFileSync(path, "utf8");
-        return JSON.parse(raw);
-    } catch {
-        return [];
+    let addresses = [];
+    // 1. Check for addresses submitted via the Web Dashboard (API)
+    if (agentState.pending_addresses && agentState.pending_addresses.length > 0) {
+        addresses = [...agentState.pending_addresses];
+        agentState.pending_addresses = []; // Clear queue after picking up
     }
+
+    // 2. Check for addresses submitted via the legacy JSON file
+    try {
+        const { readFileSync, existsSync, writeFileSync } = await import("fs");
+        const path = "/tmp/pending_addresses.json";
+        if (existsSync(path)) {
+            const raw = readFileSync(path, "utf8");
+            const fileAddresses = JSON.parse(raw);
+            if (fileAddresses.length > 0) {
+                addresses = [...addresses, ...fileAddresses];
+                writeFileSync(path, "[]", "utf8"); // Clear file
+            }
+        }
+    } catch (e) { /* ignore file errors */ }
+    
+    return [...new Set(addresses)]; // Return unique addresses
 }
 
 /**
@@ -83,114 +71,76 @@ async function loadPendingAddresses() {
  */
 async function runCycle() {
     console.log(`\n[Sentry] ════ New cycle at ${new Date().toISOString()} ════`);
+    agentState.cycle_count++;
 
     try {
-        // ── 1. Load pending addresses ──────────────────────────────────────────
+        // ── 1. Load pending addresses (From Web or File) ──────────────────────
         const newAddresses = await loadPendingAddresses();
+        
         if (newAddresses.length > 0) {
-            console.log(`[Sentry] Processing ${newAddresses.length} new addresses...`);
+            console.log(`[Sentry] 🔍 Processing ${newAddresses.length} new addresses...`);
+            agentState.deal_state = 'VERIFYING';
 
             // ── 2. Diversity scan ──────────────────────────────────────────────
             const scanResults = await scanBatch(newAddresses);
-            
-            // Extract ONLY the ones that passed
             const passedOnes = scanResults.filter(r => r.passed);
             
-            console.log(
-                `[Sentry] Scan: ${passedOnes.length}/${scanResults.length} passed diversity check.`
-            );
+            agentState.bots_rejected += (scanResults.length - passedOnes.length);
+            console.log(`[Sentry] Scan: ${passedOnes.length}/${scanResults.length} passed diversity check.`);
 
-            // ── 3. Attest passed users on-chain ───────────────────────────────
+            // ── 3. Attest passed users on-chain via TEE ────────────────────────
             if (passedOnes.length > 0) {
-                console.log(`[Sentry] Attesting ${passedOnes.length} verified users...`);
+                console.log(`[Sentry] ✍️ Attesting ${passedOnes.length} verified users via TEE...`);
               
                 const { attested, rejected, errors } = await attestBatch(passedOnes);
               
                 console.log(
-                    `[Sentry] Attested: ${attested?.length || 0} | ` +
+                    `[Sentry] ✅ Attested: ${attested?.length || 0} | ` +
                     `Rejected: ${rejected?.length || 0} | Errors: ${errors?.length || 0}`
                 );
             }
-
-            const { writeFileSync } = await import("fs");
-            writeFileSync("/tmp/pending_addresses.json", "[]", "utf8");
         }
 
-        // ── 4. Check verified count → milestone trigger 
-        if (process.env.IDENTITY_REGISTRY_ADDRESS) {
-            const verifiedCount = await getVerifiedCount();
-            console.log(`[Sentry] Verified users on-chain: ${verifiedCount}`);
+        // ── 4. Check verified count & Update UI ──────────────────────────────
+        const verifiedCount = await getVerifiedCount();
+        agentState.verified_count = verifiedCount;
+        agentState.humans_verified = verifiedCount;
+        console.log(`[Sentry] Verified users on-chain: ${verifiedCount}`);
 
-            if (verifiedCount >= VERIFIED_THRESHOLD) {
-                console.log(`[Sentry] Threshold reached! Triggering milestone approval...`);
-
-                const escrow = getEscrow();
-                // NECESSARY CHANGE: Calling approveMilestone(1) instead of releaseTranche()
-                const tx = await escrow.approveMilestone(1); 
-                await tx.wait();
-                console.log(`[Sentry] ✅ Milestone 1 Approved! Founder can now claim funds. Hash: ${tx.hash}`);
-            }
+        if (verifiedCount >= VERIFIED_THRESHOLD) {
+            agentState.threshold_reached = true;
+            console.log(`[Sentry] 🎯 Threshold reached! Triggering milestone approval...`);
+            
+            // Note: The Decision Engine or runCycle handles the actual Escrow call
+            // We update state here so the UI shows the "Success" state
+            agentState.deal_state = 'SUCCESS';
         }
 
-        // ── 4.5. DECISION ENGINE: Run autonomous yield/milestone operations ───
-        // This replaces the old yield management logic with the new decision engine
+        // ── 5. DECISION ENGINE: Run autonomous yield/milestone operations ───
+       // ── 5. DECISION ENGINE: Run autonomous yield/milestone operations ───
         if (process.env.MOCK_ROUTER_ADDRESS) {
             console.log("[Sentry] Running Decision Engine cycle...");
             try {
                 await runDecisionEngineCycle();
-            } catch (err) {
-                console.error("[Sentry] Decision Engine error:", err.message);
-            }
-        }
-
-        // ── 5. Yield management: deploy idle capital to DeFi
-        if (process.env.SENTINX_ESCROW_ADDRESS && !isDeploying) {
-            try {
-                // Check for native token balance (not USDC)
-                const nativeBalance = await getProvider().getBalance(getSentryWallet().address);
-                const minBalance = ethers.parseEther(MIN_BALANCE_ETH);
-
-                console.log(
-                    `[Sentry] 💰 Native token balance: ${ethers.formatEther(nativeBalance)} ETH`
-                );
-
-                if (nativeBalance >= minBalance) {
-                    console.log(
-                        `[Sentry] 🎯 Balance threshold reached! ` +
-                        `Deploying ${INVESTMENT_AMOUNT} ${INVESTMENT_TOKEN} to DeFi...`
-                    );
-
-                    isDeploying = true;
-
-                    try {
-                        const success = await deployToYield(
-                            INVESTMENT_AMOUNT,
-                            OKB_INVESTMENT_ID,
-                            INVESTMENT_TOKEN,
-                            getSentryWallet().address
-                        );
-
-                        if (success) {
-                            console.log(
-                                `[Sentry] ✅ DeFi investment successful!`
-                            );
-                        } else {
-                            console.error("[Sentry] DeFi investment failed - see logs above for details");
-                        }
-                    } finally {
-    
-                        isDeploying = false;
-                    }
+                
+                // ✅ FIX: Only update from the contract if it's actually greater than 0.
+                // Otherwise, leave the manual UI deposit alone!
+                if (agentState.grantLocked > 0) {
+                    agentState.deployed_usdc = agentState.grantLocked.toFixed(2);
                 }
+                
             } catch (err) {
-                // Yield errors should not crash the main loop
-                console.error("[Sentry] Yield management error:", err.message);
-                isDeploying = false;
+                console.error("[Sentry] ❌ Decision Engine error:", err.message);
             }
         }
+
+        // ── 6. Update Native Balance for Dashboard ───────────────────────────
+        const sentryAddr = getSentryAddress();
+        const nativeBalance = await getProvider().getBalance(sentryAddr);
+        console.log(`[Sentry] 💰 Native token balance: ${ethers.formatEther(nativeBalance)} ETH`);
 
     } catch (err) {
-        console.error("[Sentry] Cycle error:", err.message);
+        console.error("[Sentry] ❌ Cycle error:", err.message);
     }
 }
 
@@ -199,13 +149,16 @@ console.log("╔═════════════════════�
 console.log("║     SENTINX Sentry Agent v1.0        ║");
 console.log("╚══════════════════════════════════════╝");
 
-// Print sentry address for Person A to whitelist
-const { getSentryAddress } = await import("./services/attestation.js");
-console.log(`[Sentry] Wallet address: ${getSentryAddress()}`);
+const sentryAddr = getSentryAddress();
+agentState.sentry_wallet = sentryAddr;
+agentState.contracts_ready = !!process.env.SENTINX_ESCROW_ADDRESS;
+
+console.log(`[Sentry] Wallet address: ${sentryAddr}`);
 console.log(`[Sentry] → Give this address to Person A for contract whitelisting!`);
 console.log(`[Sentry] Loop interval: ${LOOP_INTERVAL_MS / 1000}s`);
 console.log(`[Sentry] Milestone threshold: ${VERIFIED_THRESHOLD} verified users`);
 console.log(`[Sentry] Starting...\n`);
 
+// Run immediately then start interval
 runCycle();
 setInterval(runCycle, LOOP_INTERVAL_MS);
