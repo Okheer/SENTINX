@@ -1,0 +1,37 @@
+/* ============================================
+   TOAST NOTIFICATIONS
+   ============================================ */
+
+.toast {
+    position: fixed;
+    bottom: 2rem;
+    right: 2rem;
+    background: linear-gradient(135deg, var(--color-primary) 0%, var(--color-primary-dark) 100%);
+    color: white;
+    padding: 1rem 1.5rem;
+    border-radius: 0.75rem;
+    box-shadow: var(--shadow-lg);
+    opacity: 0;
+    transform: translateY(20px) translateX(400px);
+    transition: var(--transition);
+    z-index: 1000;
+    max-width: 300px;
+    font-weight: 500;
+}
+
+.toast.show {
+    opacity: 1;
+    transform: translateY(0) translateX(0);
+}
+
+/* ============================================
+   RESPONSIVE
+   ============================================ */
+
+@media (max-width: 480px) {
+    .toast {
+        max-width: 90vw;
+        right: 1rem;
+        bottom: 1rem;
+    }
+}
